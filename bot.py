@@ -25,7 +25,7 @@ from telegram.ext import (
 )
 
 # Render Environment Variable se bot token uthayega
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
+TELEGRAM_BOT_TOKEN = os.getenv("8544323418:AAEP2BJACBmCYan6tdnnMnQqtd0nvIsQQ7o", "8544323418:AAEP2BJACBmCYan6tdnnMnQqtd0nvIsQQ7o")
 
 BASE = "https://api-gateway.juno.lenskart.com"
 
