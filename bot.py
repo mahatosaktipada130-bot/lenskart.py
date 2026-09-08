@@ -224,7 +224,7 @@ def main():
     # Background Flask Thread Start for Render Web Binding
     Thread(target=run_flask, daemon=True).start()
     
-    bot_token = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
+    bot_token = os.environ.get("BOT_TOKEN", "8544323418:AAEP2BJACBmCYan6tdnnMnQqtd0nvIsQQ7o")
     
     application = Application.builder().token(bot_token).build()
 
@@ -243,3 +243,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
