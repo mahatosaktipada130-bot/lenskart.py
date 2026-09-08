@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-Lenskart "Run For Frame" - Non-Interactive / Web-Friendly
-Render Compatible Version
+Lenskart "Run For Frame" - Render Compatible Telegram Bot
 """
 
+import os
 import json
 import random
-import sys
 import time
 import uuid
 import hashlib
 import base64
 import requests
-from datetime import datetime
+import asyncio
+from flask import Flask
+from threading import Thread
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
 BASE = "https://api-gateway.juno.lenskart.com"
 
@@ -26,6 +29,17 @@ MODELS = {
     "vivo": ["V2024", "V2036", "V2041", "V2115"]
 }
 ANDROID_VERSIONS = ["13", "14"]
+
+# Flask App for Render Binding
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running fine on Render!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
 
 class LenskartFakeDevice:
     def __init__(self, phone: str, phone_code: str = "+91"):
@@ -157,6 +171,75 @@ class LenskartFakeDevice:
             return r.json().get("result", {}).get("giftVoucher")
         return None
 
-if __name__ == "__main__":
-    print("Render instance started successfully.")
+# Telegram Conversation States
+PHONE, OTP = range(2)
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Hello! Mobile Number bhejo jiske liye Voucher chahiye:")
+    return PHONE
+
+async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phone = update.message.text.strip()
+    if phone.startswith("+91"):
+        phone = phone[3:]
+    elif phone.startswith("91") and len(phone) == 12:
+        phone = phone[2:]
+        
+    if not phone.isdigit() or len(phone) != 10:
+        await update.message.reply_text("❌ Galat mobile number! 10 Digit number dobara bhejo:")
+        return PHONE
+
+    device = LenskartFakeDevice(phone)
+    if not device.create_session() or not device.send_otp():
+        await update.message.reply_text("❌ Session create/OTP send nahi hua. Dobara try karo /start.")
+        return ConversationHandler.END
+
+    context.user_data['device'] = device
+    await update.message.reply_text(f"📩 OTP sent to {phone}. Aaya hua OTP yahan type karo:")
+    return OTP
+
+async def handle_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    otp = update.message.text.strip()
+    device = context.user_data.get('device')
+
+    if not device or not device.verify_otp(otp):
+        await update.message.reply_text("❌ OTP Galat hai ya verify nahi hua. Wapas try karne ke liye /start likho.")
+        return ConversationHandler.END
+
+    await update.message.reply_text("⏳ Processing reward claim...")
+    voucher = device.claim_reward(steps=30000)
+
+    if voucher:
+        await update.message.reply_text(f"🎉 **Voucher Claimed Successfully!**\n\n🎁 Code: `{voucher}`", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("⚠️ Reward claim nahi hua. (User already claimed or criteria not met).")
+
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
+
+def main():
+    # Background Flask Thread Start for Render Web Binding
+    Thread(target=run_flask, daemon=True).start()
+    
+    bot_token = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
+    
+    application = Application.builder().token(bot_token).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone)],
+            OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_otp)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
+    application.add_handler(conv_handler)
+    print("Bot is starting...")
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
