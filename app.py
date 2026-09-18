@@ -191,12 +191,86 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_msg = (
             "🛠 *GUIDE*\n\n"
             "1️⃣ *Login Button* click karke number enter karein aur OTP verification karein.\n"
-            "2️⃣ *Blast Engine* select karke target account par automatic claim script run karein.\n"
-            "3️⃣ Direct commands like `/blast <mobile>` & `/login <mobile>` bhi support honge."
+            "2️⃣ *Blast Engine* select karke target account par automatic claim script run karein."
         )
         await query.edit_message_text(help_msg, parse_mode="Markdown", reply_markup=keyboard)
 
-# --- TEXT INPUT INTERCEPTOR (FOR BUTTON-BASED FLOW) ---
+# --- SHOPSY AUTH FUNCTIONS ---
+def send_otp_request(mobile_number):
+    device_id = uuid.uuid4().hex
+    auth_url = "https://1.rome.api.flipkart.net/1/action/view"
+    
+    headers = {
+        "FK-TENANT-ID": "SHOPSY",
+        "business": "reseller",
+        "X-PARTNER-CONTEXT": '{"source":"reseller"}',
+        "Content-Type": "application/json; charset=UTF-8",
+        "User-Agent": "okhttp/4.9.2",
+        "X-Layout-Version": '{"appVersion":"910000","frameworkVersion":"1.0"}',
+        "X-User-Agent": f"Mozilla/5.0 (Linux; Android 16; CPH2585 Build/TP1A.220905.001) FKUA/Retail/2291175/Android/Mobile (OnePlus/CPH2585/{device_id})"
+    }
+
+    payload_1 = {
+        "actionRequestContext": {
+            "type": "LOGIN_IDENTITY_VERIFY_SHOPSY2",
+            "loginId": mobile_number,
+            "loginIdPrefix": "+91",
+            "phoneNumberFormat": "E164",
+            "addAppHash": True,
+            "loginType": "MOBILE",
+            "verificationType": "OTP",
+            "sourceContext": "Account"
+        }
+    }
+
+    res = requests.post(auth_url, headers=headers, json=payload_1)
+    res_json = res.json()
+    action_context = res_json.get('RESPONSE', {}).get('actionResponseContext', {})
+    
+    req_id = action_context.get('requestId')
+    sess = res_json.get("SESSION", {})
+    
+    if "at" in sess: headers["at"] = sess["at"]
+    if "sn" in sess: headers["sn"] = sess["sn"]
+
+    return req_id, headers, device_id
+
+def verify_otp_request(mobile, otp_code, req_id, saved_headers):
+    auth_url = "https://1.rome.api.flipkart.net/1/action/view"
+
+    payload_2 = {
+        "actionRequestContext": {
+            "type": "LOGIN_SHOPSY2",
+            "loginId": mobile,
+            "loginIdPrefix": "+91",
+            "otp": str(otp_code),
+            "otpRequestId": req_id,
+            "phoneNumberFormat": "E164",
+            "loginType": "MOBILE",
+            "verificationType": "OTP",
+            "sourceContext": "Account"
+        }
+    }
+
+    res = requests.post(auth_url, headers=saved_headers, json=payload_2)
+    res_data = res.json()
+    
+    session_data = res_data.get("SESSION", {})
+    
+    account_id = session_data.get("accountId") or res_data.get("RESPONSE", {}).get("actionResponseContext", {}).get("accountId")
+    access_token = session_data.get("at")
+
+    if account_id and access_token:
+        tokens = {
+            "at": access_token,
+            "sn": session_data.get("sn", saved_headers.get("sn")),
+            "secureToken": saved_headers.get("secureToken"),
+            "vid": saved_headers.get("X-Visit-Id")
+        }
+        return True, account_id, tokens
+    return False, None, None
+
+# --- TEXT INPUT INTERCEPTOR ---
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
@@ -209,91 +283,35 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if step == "AWAITING_MOBILE":
         mobile_number = text
-        device_id = uuid.uuid4().hex
-        page_fetch_url = "https://1.rome.api.flipkart.net/4/page/fetch"
-        auth_url = "https://1.rome.api.flipkart.net/1/action/view"
-        
-        session = requests.Session()
-        session.headers.update({
-            "FK-TENANT-ID": "SHOPSY", "business": "reseller", "X-PARTNER-CONTEXT": '{"source":"reseller"}',
-            "Content-Type": "application/json; charset=UTF-8", "User-Agent": "okhttp/4.9.2",
-            "X-Layout-Version": '{"appVersion":"910000","frameworkVersion":"1.0"}',
-            "X-User-Agent": f"Mozilla/5.0 (Linux; Android 16; CPH2585 Build/TP1A.220905.001) FKUA/Retail/2291175/Android/Mobile (OnePlus/CPH2585/{device_id})"
-        })
+        try:
+            req_id, headers, device_id = send_otp_request(mobile_number)
+            if not req_id:
+                await update.message.reply_text("⛔ *Failed to send OTP!* Number check karein ya rate limit hit hui hai.", parse_mode="Markdown", reply_markup=get_cancel_keyboard())
+                return
 
-        pre_flight_payload = {
-            "pageUri": "https://www.shopsy.in/shopsy2-login-page-store?sourceContext=Account",
-            "pageContext": {"paginatedFetch": False, "pageNumber": 1, "fetchAllPages": False, "fetchSeoData": False}
-        }
-        pre_res = session.post(page_fetch_url, json=pre_flight_payload)
-        if pre_res.status_code == 200:
-            sess_state_0 = pre_res.json().get("SESSION", {})
-            if "at" in sess_state_0: session.headers["at"] = sess_state_0["at"]
-            if "sn" in sess_state_0: session.headers["sn"] = sess_state_0["sn"]
-
-        payload_1 = {
-            "actionRequestContext": {
-                "type": "LOGIN_IDENTITY_VERIFY_SHOPSY2", "loginId": mobile_number, "loginIdPrefix": "+91",
-                "phoneNumberFormat": "E164", "addAppHash": True, "loginType": "MOBILE", "verificationType": "OTP",
-                "sourceContext": "Account", "clientQueryParamMap": None
+            USER_STATES[user_id] = {
+                "step": "AWAITING_OTP",
+                "mobile": mobile_number,
+                "req_id": req_id,
+                "headers": headers,
+                "device_id": device_id
             }
-        }
-
-        response_1 = session.post(auth_url, json=payload_1)
-        res_data_1 = response_1.json()
-        action_context = res_data_1.get('RESPONSE', {}).get('actionResponseContext', {})
-
-        if action_context.get('remainingAttempts') == 0:
-            await update.message.reply_text("⛔ *Rate Limit Exceeded!*", parse_mode="Markdown", reply_markup=get_cancel_keyboard())
-            return
-
-        req_id = action_context.get('requestId')
-        sess_state_1 = res_data_1.get("SESSION", {})
-        if "at" in sess_state_1: session.headers["at"] = sess_state_1["at"]
-        if "sn" in sess_state_1: session.headers["sn"] = sess_state_1["sn"]
-
-        USER_STATES[user_id] = {
-            "step": "AWAITING_OTP",
-            "mobile": mobile_number, 
-            "req_id": req_id,
-            "headers": dict(session.headers), 
-            "device_id": device_id
-        }
-        await update.message.reply_text(
-            f"📲 *OTP Sent to `{mobile_number}`*\n\nAb WhatsApp / SMS par aaya hua **OTP code enter karein**:",
-            parse_mode="Markdown",
-            reply_markup=get_cancel_keyboard()
-        )
+            await update.message.reply_text(
+                f"📲 *OTP Sent to `{mobile_number}`*\n\nAb WhatsApp / SMS par aaya hua **OTP code enter karein**:",
+                parse_mode="Markdown",
+                reply_markup=get_cancel_keyboard()
+            )
+        except Exception:
+            await update.message.reply_text("❌ Connection error while requesting OTP.", reply_markup=get_cancel_keyboard())
 
     elif step == "AWAITING_OTP":
         otp_code = text
         state = USER_STATES[user_id]
-        auth_url = "https://1.rome.api.flipkart.net/1/action/view"
 
-        session = requests.Session()
-        session.headers.update(state["headers"])
+        success, account_id, tokens = verify_otp_request(state["mobile"], otp_code, state["req_id"], state["headers"])
 
-        payload_2 = {
-            "actionRequestContext": {
-                "type": "LOGIN_SHOPSY2", "loginId": state["mobile"], "loginIdPrefix": "+91", "password": None,
-                "otp": otp_code, "otpRequestId": state["req_id"], "remainingAttempts": 5, "phoneNumberFormat": "E164",
-                "loginType": "MOBILE", "verificationType": "OTP", "sourceContext": "Account", "churned": False,
-                "otpRegex": None, "data": None, "clientQueryParamMap": None
-            }
-        }
-
-        response_2 = session.post(auth_url, json=payload_2)
-        res_data_2 = response_2.json()
-        session_data_2 = res_data_2.get("SESSION", {})
-        account_id = session_data_2.get("accountId")
-        access_token = session_data_2.get("at")
-
-        if account_id and access_token:
-            auth_tokens = {
-                "at": access_token, "sn": session_data_2.get("sn", session.headers.get("sn")),
-                "secureToken": session.headers.get("secureToken"), "vid": session.headers.get("X-Visit-Id")
-            }
-            save_session(state["mobile"], account_id, auth_tokens)
+        if success:
+            save_session(state["mobile"], account_id, tokens)
             del USER_STATES[user_id]
             
             keyboard = InlineKeyboardMarkup([
@@ -306,110 +324,22 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard
             )
         else:
-            await update.message.reply_text("❌ *Login Failed!* Incorrect OTP. Dobara try karein:", parse_mode="Markdown", reply_markup=get_cancel_keyboard())
+            await update.message.reply_text("❌ *Login Failed!* Incorrect OTP ya expired session. Dobara OTP enter karein:", parse_mode="Markdown", reply_markup=get_cancel_keyboard())
 
-# --- COMMAND COMPATIBILITY & HELPER ENGINE ---
+# --- COMMAND COMPATIBILITY ENGINE ---
 async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        user_id = update.effective_user.id
-        USER_STATES[user_id] = {"step": "AWAITING_MOBILE"}
-        await update.message.reply_text("📲 Kripya 10-digit Shopsy Mobile Number send karein:", parse_mode="Markdown", reply_markup=get_cancel_keyboard())
-        return
-
-    # Classic slash command handling logic remains intact
-    mobile_number = context.args[0].strip()
     user_id = update.effective_user.id
-    device_id = uuid.uuid4().hex
-    page_fetch_url = "https://1.rome.api.flipkart.net/4/page/fetch"
-    auth_url = "https://1.rome.api.flipkart.net/1/action/view"
-    
-    session = requests.Session()
-    session.headers.update({
-        "FK-TENANT-ID": "SHOPSY", "business": "reseller", "X-PARTNER-CONTEXT": '{"source":"reseller"}',
-        "Content-Type": "application/json; charset=UTF-8", "User-Agent": "okhttp/4.9.2",
-        "X-Layout-Version": '{"appVersion":"910000","frameworkVersion":"1.0"}',
-        "X-User-Agent": f"Mozilla/5.0 (Linux; Android 16; CPH2585 Build/TP1A.220905.001) FKUA/Retail/2291175/Android/Mobile (OnePlus/CPH2585/{device_id})"
-    })
-
-    pre_flight_payload = {
-        "pageUri": "https://www.shopsy.in/shopsy2-login-page-store?sourceContext=Account",
-        "pageContext": {"paginatedFetch": False, "pageNumber": 1, "fetchAllPages": False, "fetchSeoData": False}
-    }
-    pre_res = session.post(page_fetch_url, json=pre_flight_payload)
-    if pre_res.status_code == 200:
-        sess_state_0 = pre_res.json().get("SESSION", {})
-        if "at" in sess_state_0: session.headers["at"] = sess_state_0["at"]
-        if "sn" in sess_state_0: session.headers["sn"] = sess_state_0["sn"]
-
-    payload_1 = {
-        "actionRequestContext": {
-            "type": "LOGIN_IDENTITY_VERIFY_SHOPSY2", "loginId": mobile_number, "loginIdPrefix": "+91",
-            "phoneNumberFormat": "E164", "addAppHash": True, "loginType": "MOBILE", "verificationType": "OTP",
-            "sourceContext": "Account", "clientQueryParamMap": None
-        }
-    }
-
-    response_1 = session.post(auth_url, json=payload_1)
-    res_data_1 = response_1.json()
-    action_context = res_data_1.get('RESPONSE', {}).get('actionResponseContext', {})
-
-    if action_context.get('remainingAttempts') == 0:
-        await update.message.reply_text("⛔ *Rate Limit Exceeded!*", parse_mode="Markdown")
-        return
-
-    req_id = action_context.get('requestId')
-    sess_state_1 = res_data_1.get("SESSION", {})
-    if "at" in sess_state_1: session.headers["at"] = sess_state_1["at"]
-    if "sn" in sess_state_1: session.headers["sn"] = sess_state_1["sn"]
-
-    USER_STATES[user_id] = {
-        "step": "AWAITING_OTP",
-        "mobile": mobile_number, "req_id": req_id,
-        "headers": dict(session.headers), "device_id": device_id
-    }
-    await update.message.reply_text(f"📲 *OTP Sent to `{mobile_number}`*\nSubmit code: `/otp <code_here>`", parse_mode="Markdown")
+    USER_STATES[user_id] = {"step": "AWAITING_MOBILE"}
+    await update.message.reply_text("📲 Kripya 10-digit Shopsy Mobile Number send karein:", parse_mode="Markdown", reply_markup=get_cancel_keyboard())
 
 async def otp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in USER_STATES:
-        await update.message.reply_text("❌ Run `/login <mobile>` or click Login Button first.", parse_mode="Markdown")
+    if user_id not in USER_STATES or USER_STATES[user_id].get("step") != "AWAITING_OTP":
+        await update.message.reply_text("❌ Run `/login` or click Login Button first.", parse_mode="Markdown")
         return
-    if not context.args:
-        await update.message.reply_text("⚠️ Usage: `/otp 123456`", parse_mode="Markdown")
-        return
-
-    otp_code = context.args[0].strip()
-    state = USER_STATES[user_id]
-    auth_url = "https://1.rome.api.flipkart.net/1/action/view"
-
-    session = requests.Session()
-    session.headers.update(state["headers"])
-
-    payload_2 = {
-        "actionRequestContext": {
-            "type": "LOGIN_SHOPSY2", "loginId": state["mobile"], "loginIdPrefix": "+91", "password": None,
-            "otp": otp_code, "otpRequestId": state["req_id"], "remainingAttempts": 5, "phoneNumberFormat": "E164",
-            "loginType": "MOBILE", "verificationType": "OTP", "sourceContext": "Account", "churned": False,
-            "otpRegex": None, "data": None, "clientQueryParamMap": None
-        }
-    }
-
-    response_2 = session.post(auth_url, json=payload_2)
-    res_data_2 = response_2.json()
-    session_data_2 = res_data_2.get("SESSION", {})
-    account_id = session_data_2.get("accountId")
-    access_token = session_data_2.get("at")
-
-    if account_id and access_token:
-        auth_tokens = {
-            "at": access_token, "sn": session_data_2.get("sn", session.headers.get("sn")),
-            "secureToken": session.headers.get("secureToken"), "vid": session.headers.get("X-Visit-Id")
-        }
-        save_session(state["mobile"], account_id, auth_tokens)
-        del USER_STATES[user_id]
-        await update.message.reply_text(f"🎉 *Login Successful!* Saved `{state['mobile']}`.", parse_mode="Markdown", reply_markup=get_main_keyboard())
-    else:
-        await update.message.reply_text("❌ *Login Failed!* Invalid OTP.", parse_mode="Markdown")
+    if context.args:
+        update.message.text = context.args[0]
+        await handle_text_input(update, context)
 
 async def run_blast_process(target_msg, mobile_number, is_callback=False):
     sessions = load_sessions()
@@ -486,7 +416,6 @@ def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
-# Flask ko background thread par start karein
 flask_thread = threading.Thread(target=run_flask, daemon=True)
 flask_thread.start()
 
@@ -497,18 +426,15 @@ if __name__ == "__main__":
 
     bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Handlers Registration
     bot_app.add_handler(CommandHandler("start", start_command))
     bot_app.add_handler(CommandHandler("login", login_command))
     bot_app.add_handler(CommandHandler("otp", otp_command))
     bot_app.add_handler(CommandHandler("blast", blast_command))
     bot_app.add_handler(CommandHandler("accounts", accounts_command))
     
-    # Callback & Text message capture handlers
     bot_app.add_handler(CallbackQueryHandler(callback_handler))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
-    # Old Webhooks clear karein
     try:
         requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true")
     except Exception:
