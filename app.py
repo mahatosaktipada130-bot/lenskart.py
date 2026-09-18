@@ -6,8 +6,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from google import genai
 
 # Load Environment Variables
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("8376027265:AAFuOeCcDrQ7Ws4WGDkDy3vmpfgJa8iaGCE")
+GEMINI_API_KEY = os.getenv("AQ.Ab8RN6IU_a-8qJE50zw0XKTbZnim-0cKC7C2HHlLOXOzv7-6UQ")
 
 # Initialize Flask App & Gemini Client
 app = Flask(__name__)
