@@ -1,5 +1,1 @@
-Flask
-requests
-aiohttp
-gunicorn
-python-telegram-bot
+web: gunicorn app:app
