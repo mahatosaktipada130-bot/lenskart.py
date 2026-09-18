@@ -2,14 +2,14 @@ import os
 import urllib.parse
 import base64
 from flask import Flask, request
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Flask app initialization
 app = Flask(__name__)
 
-# Configs
-TOKEN = os.getenv("TELEGRAM_TOKEN")
+# Configs - Direct Token Fallback added
+TOKEN = os.getenv("TELEGRAM_TOKEN", "8772577579:AAGwh5SabsaB26fgMGm9vO9FBnFtCwn37KQ")
 WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")  # Render automatically ye URL provide karta hai
 
 # Telegram Application Setup
@@ -61,7 +61,6 @@ async def webhook():
 if __name__ == "__main__":
     import asyncio
     
-    # Render port dynamic deta hai
     port = int(os.environ.get("PORT", 5000))
     
     # Webhook setup function
@@ -74,4 +73,3 @@ if __name__ == "__main__":
 
     asyncio.run(setup_webhook())
     app.run(host="0.0.0.0", port=port)
-
