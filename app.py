@@ -66,27 +66,43 @@ def save_session(mobile, account_id, tokens):
 
 # --- ASYNC SHOPSY BLAST ENGINE ---
 async def prepare_and_wait(session, games_url, game_id, account_id, headers, fire_trigger):
-    start_payload = {"requestMethod": "POST", "routeUri": "game/game-started", "payload": {"userId": account_id, "gameId": game_id}}
+    start_payload = {
+        "requestMethod": "POST",
+        "routeUri": "game/game-started",
+        "payload": {"userId": account_id, "gameId": game_id}
+    }
     try:
         async with session.post(games_url, headers=headers, json=start_payload) as start_req:
             if start_req.status != 200: return 0
             start_res = await start_req.json()
-            if not start_res.get("success"): return 0
-            game_session_id = start_res["data"]["sessionId"]
+            
+            # Fix: extract gameSessionId safely
+            data = start_res.get("data", {})
+            game_session_id = data.get("sessionId") or data.get("gameSessionId")
+            if not game_session_id: return 0
 
-        gems_count = random.randint(1000, 5000)
-        play_time = random.randint(80, 99)
+        gems_count = random.randint(1500, 5000)
+        play_time = random.randint(85, 110)
+        
         end_payload = {
-            "requestMethod": "POST", "routeUri": "game/game-ended",
-            "payload": {"userId": account_id, "gameId": game_id, "sessionId": game_session_id, "gemsEarned": gems_count, "playTimeInSec": play_time}
+            "requestMethod": "POST",
+            "routeUri": "game/game-ended",
+            "payload": {
+                "userId": account_id,
+                "gameId": game_id,
+                "sessionId": game_session_id,
+                "gemsEarned": gems_count,
+                "playTimeInSec": play_time
+            }
         }
         await fire_trigger.wait()
         async with session.post(games_url, headers=headers, json=end_payload) as end_req:
             if end_req.status == 200:
                 end_res = await end_req.json()
-                if end_res.get("success"):
-                    return end_res.get("data", {}).get("coinsEarnedForGame", 0)
-    except Exception: pass
+                res_data = end_res.get("data", {})
+                return res_data.get("coinsEarnedForGame", 0) or res_data.get("coinsClaimed", 0) or res_data.get("rewardCoins", 0)
+    except Exception:
+        pass
     return 0
 
 async def execute_async_blast(games_url, account_id, headers, queued_tasks, max_threads=800):
@@ -256,7 +272,6 @@ def verify_otp_request(mobile, otp_code, req_id, saved_headers):
     res_data = res.json()
     
     session_data = res_data.get("SESSION", {})
-    
     account_id = session_data.get("accountId") or res_data.get("RESPONSE", {}).get("actionResponseContext", {}).get("accountId")
     access_token = session_data.get("at")
 
@@ -264,8 +279,8 @@ def verify_otp_request(mobile, otp_code, req_id, saved_headers):
         tokens = {
             "at": access_token,
             "sn": session_data.get("sn", saved_headers.get("sn")),
-            "secureToken": saved_headers.get("secureToken"),
-            "vid": saved_headers.get("X-Visit-Id")
+            "secureToken": session_data.get("secureToken", saved_headers.get("secureToken")),
+            "vid": session_data.get("vid", saved_headers.get("X-Visit-Id"))
         }
         return True, account_id, tokens
     return False, None, None
@@ -326,21 +341,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("❌ *Login Failed!* Incorrect OTP ya expired session. Dobara OTP enter karein:", parse_mode="Markdown", reply_markup=get_cancel_keyboard())
 
-# --- COMMAND COMPATIBILITY ENGINE ---
-async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    USER_STATES[user_id] = {"step": "AWAITING_MOBILE"}
-    await update.message.reply_text("📲 Kripya 10-digit Shopsy Mobile Number send karein:", parse_mode="Markdown", reply_markup=get_cancel_keyboard())
-
-async def otp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in USER_STATES or USER_STATES[user_id].get("step") != "AWAITING_OTP":
-        await update.message.reply_text("❌ Run `/login` or click Login Button first.", parse_mode="Markdown")
-        return
-    if context.args:
-        update.message.text = context.args[0]
-        await handle_text_input(update, context)
-
+# --- RUN BLAST WITH AUTH TOKENS FIX ---
 async def run_blast_process(target_msg, mobile_number, is_callback=False):
     sessions = load_sessions()
     if mobile_number not in sessions:
@@ -360,18 +361,27 @@ async def run_blast_process(target_msg, mobile_number, is_callback=False):
 
     data = sessions[mobile_number]
     account_id = data["account_id"]
-    games_url = "https://1.rome.api.flipkart.net/1/shopsy/games"
+    tokens = data.get("tokens", {})
 
+    games_url = "https://1.rome.api.flipkart.net/1/shopsy/games"
     device_id = uuid.uuid4().hex
+    
+    # Authenticated headers set karein
     games_headers = {
+        "FK-TENANT-ID": "SHOPSY",
+        "business": "reseller",
+        "Content-Type": "application/json; charset=UTF-8",
+        "User-Agent": "okhttp/4.9.2",
         "x-user-agent": f"Mozilla/5.0 (Linux; Android 16; CPH2585 Build/TP1A.220905.001) FKUA/Retail/2291175/Android/Mobile (OnePlus/CPH2585/{device_id})",
-        "sessionid": "session_id", "Content-Type": "application/json; charset=UTF-8", "User-Agent": "okhttp/4.9.2"
+        "at": tokens.get("at", ""),
+        "sn": tokens.get("sn", "")
     }
 
     try:
-        requests.post(games_url, headers=games_headers, json={"requestMethod":"GET","routeUri":"user/get-user","payload":{"userId":account_id,"userName":"User"}})
-        requests.post(games_url, headers=games_headers, json={"requestMethod":"POST","routeUri":"gullak/claim-gullak","payload":{"userId":account_id}})
-    except Exception: pass
+        requests.post(games_url, headers=games_headers, json={"requestMethod": "GET", "routeUri": "user/get-user", "payload": {"userId": account_id, "userName": "User"}})
+        requests.post(games_url, headers=games_headers, json={"requestMethod": "POST", "routeUri": "gullak/claim-gullak", "payload": {"userId": account_id}})
+    except Exception:
+        pass
 
     queued_tasks = list(GAMES_LIST)
     total_coins = await execute_async_blast(games_url, account_id, games_headers, queued_tasks, max_threads=800)
@@ -385,6 +395,21 @@ async def run_blast_process(target_msg, mobile_number, is_callback=False):
         parse_mode="Markdown",
         reply_markup=keyboard
     )
+
+# --- COMMAND COMPATIBILITY ENGINE ---
+async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    USER_STATES[user_id] = {"step": "AWAITING_MOBILE"}
+    await update.message.reply_text("📲 Kripya 10-digit Shopsy Mobile Number send karein:", parse_mode="Markdown", reply_markup=get_cancel_keyboard())
+
+async def otp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in USER_STATES or USER_STATES[user_id].get("step") != "AWAITING_OTP":
+        await update.message.reply_text("❌ Run `/login` or click Login Button first.", parse_mode="Markdown")
+        return
+    if context.args:
+        update.message.text = context.args[0]
+        await handle_text_input(update, context)
 
 async def blast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
