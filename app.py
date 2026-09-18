@@ -4,37 +4,67 @@ import time
 import uuid
 import random
 import asyncio
+import sqlite3
 import aiohttp
 import requests
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
 # Hardcoded Bot Token & Config
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8772577579:AAGP6OKPBcY6OIwb48OS4nAWM00LVIM9imE")
-SESSION_FILE = "shopsy_sessions.json"
+DB_FILE = "shopsy_sessions.db"
 GAMES_LIST = ["ludo", "match-3", "city-builder", "goods-triple", "runner-3d", "nazaria"]
 
 app = Flask(__name__)
+
+# Single Global Event Loop & Bot Instance
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-# Temporary memory to manage user states (OTP flow)
+# Temporary memory for OTP flow
 USER_STATES = {}
 
-# Helper Functions
+# --- DATABASE HELPERS ---
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            mobile TEXT PRIMARY KEY,
+            account_id TEXT,
+            tokens TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
 def load_sessions():
-    if os.path.exists(SESSION_FILE):
-        with open(SESSION_FILE, "r") as f:
-            try: return json.load(f)
-            except: return {}
-    return {}
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT mobile, account_id, tokens FROM sessions")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    sessions = {}
+    for row in rows:
+        sessions[row[0]] = {"account_id": row[1], "tokens": json.loads(row[2])}
+    return sessions
 
 def save_session(mobile, account_id, tokens):
-    sessions = load_sessions()
-    sessions[mobile] = {"account_id": account_id, "tokens": tokens}
-    with open(SESSION_FILE, "w") as f:
-        json.dump(sessions, f, indent=4)
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR REPLACE INTO sessions (mobile, account_id, tokens) VALUES (?, ?, ?)",
+        (mobile, account_id, json.dumps(tokens))
+    )
+    conn.commit()
+    conn.close()
 
+# --- SHOPSY ASYNC LOGIC ---
 async def prepare_and_wait(session, games_url, game_id, account_id, headers, fire_trigger):
     start_payload = {"requestMethod": "POST", "routeUri": "game/game-started", "payload": {"userId": account_id, "gameId": game_id}}
     try:
@@ -72,8 +102,7 @@ async def execute_async_blast(games_url, account_id, headers, queued_tasks, max_
         results = await asyncio.gather(*tasks)
         return sum(filter(None, results))
 
-# --- PREMIUM UI TELEGRAM HANDLERS ---
-
+# --- HANDLERS ---
 async def start_command(update: Update, context):
     keyboard = [
         [InlineKeyboardButton("📱 Saved Accounts", callback_data="view_accounts"),
@@ -81,7 +110,6 @@ async def start_command(update: Update, context):
         [InlineKeyboardButton("⚡ Help & Commands", callback_data="view_help")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
     msg = (
         "✨ *WELCOME TO SHOPSY ULTRA BLASTER* ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -102,32 +130,13 @@ async def start_command(update: Update, context):
 async def callback_handler(update: Update, context):
     query = update.callback_query
     await query.answer()
-    
     if query.data == "view_accounts":
         await accounts_command(update, context)
     elif query.data == "quick_blast":
-        await query.message.reply_text(
-            "⚡ *Quick Blast Trigger*\n"
-            "━━━━━━━━━━━━━━━━━━━\n"
-            "Please send the command in this format:\n"
-            "`/blast <mobile_number>`",
-            parse_mode="Markdown"
-        )
+        await query.message.reply_text("⚡ Format: `/blast <mobile_number>`", parse_mode="Markdown")
     elif query.data == "view_help":
-        keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu")]]
-        help_msg = (
-            "🛠 *COMMAND USAGE GUIDE*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "1️⃣ *Login Account:*\n"
-            "   Command: `/login 9876543210`\n"
-            "   _Requests OTP for your Shopsy number._\n\n"
-            "2️⃣ *Submit OTP:*\n"
-            "   Command: `/otp 123456`\n"
-            "   _Verifies OTP & securely saves credentials._\n\n"
-            "3️⃣ *Run Blaster:*\n"
-            "   Command: `/blast 9876543210`\n"
-            "   _Launches high-concurrency games claim._\n"
-        )
+        keyboard = [[InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]]
+        help_msg = "🛠 *COMMANDS*\n`/login <mobile>`\n`/otp <code>`\n`/blast <mobile>`\n`/accounts`"
         await query.edit_message_text(help_msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
     elif query.data == "main_menu":
         await start_command(update, context)
@@ -135,12 +144,7 @@ async def callback_handler(update: Update, context):
 async def login_command(update: Update, context):
     user_id = update.effective_user.id
     if not context.args:
-        await update.message.reply_text(
-            "⚠️ *Invalid Usage!*\n"
-            "Format: `/login <10-digit-mobile>`\n"
-            "Example: `/login 9876543210`",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("⚠️ Format: `/login 9876543210`", parse_mode="Markdown")
         return
 
     mobile_number = context.args[0].strip()
@@ -191,18 +195,12 @@ async def login_command(update: Update, context):
         "mobile": mobile_number, "req_id": req_id,
         "headers": dict(session.headers), "device_id": device_id
     }
-    await update.message.reply_text(
-        "📲 *OTP DISPATCHED SUCCESSFUL*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Mobile: `{mobile_number}`\n\n"
-        "👉 Enter OTP using: `/otp <your_code>`",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"📲 *OTP Sent to `{mobile_number}`*\nSubmit: `/otp <your_code>`", parse_mode="Markdown")
 
 async def otp_command(update: Update, context):
     user_id = update.effective_user.id
     if user_id not in USER_STATES:
-        await update.message.reply_text("❌ *Session Not Found!* Run `/login <mobile>` first.", parse_mode="Markdown")
+        await update.message.reply_text("❌ Run `/login <mobile>` first.", parse_mode="Markdown")
         return
     if not context.args:
         await update.message.reply_text("⚠️ Usage: `/otp 123456`", parse_mode="Markdown")
@@ -237,18 +235,9 @@ async def otp_command(update: Update, context):
         }
         save_session(state["mobile"], account_id, auth_tokens)
         del USER_STATES[user_id]
-        
-        keyboard = [[InlineKeyboardButton("🚀 Launch Blast Now", callback_data="quick_blast")]]
-        await update.message.reply_text(
-            "🎉 *AUTHENTICATION SUCCESSFUL*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 Mobile: `{state['mobile']}`\n"
-            "✅ Session saved successfully!",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await update.message.reply_text(f"🎉 *Login Success!* Account `{state['mobile']}` saved.", parse_mode="Markdown")
     else:
-        await update.message.reply_text("❌ *Authentication Failed!* Invalid OTP code.", parse_mode="Markdown")
+        await update.message.reply_text("❌ *Login Failed!* Invalid OTP.", parse_mode="Markdown")
 
 async def blast_command(update: Update, context):
     if not context.args:
@@ -259,16 +248,10 @@ async def blast_command(update: Update, context):
     sessions = load_sessions()
 
     if mobile_number not in sessions:
-        await update.message.reply_text("❌ *Account Unregistered!* Login first using `/login`.", parse_mode="Markdown")
+        await update.message.reply_text("❌ *Account not found!* Use `/login` first.", parse_mode="Markdown")
         return
 
-    status_msg = await update.message.reply_text(
-        "🚀 *PREPARING CONCURRENCY ENGINE...*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📡 Bypassing WAF & Warming up CDN...\n"
-        "⚡ Pre-loading 800+ Game Connections...",
-        parse_mode="Markdown"
-    )
+    status_msg = await update.message.reply_text("🚀 *Executing High-Speed Blast...*", parse_mode="Markdown")
 
     data = sessions[mobile_number]
     account_id = data["account_id"]
@@ -288,52 +271,22 @@ async def blast_command(update: Update, context):
     queued_tasks = list(GAMES_LIST)
     total_coins = await execute_async_blast(games_url, account_id, games_headers, queued_tasks, max_threads=800)
 
-    try:
-        final_res = requests.post(games_url, headers=games_headers, json={"requestMethod": "GET", "routeUri": "user/get-user", "payload": {"userId": account_id, "userName": "User"}}).json()
-        final_balance = final_res.get("data", {}).get("earnings", {}).get("coinsEarnedTotal", 0)
-    except Exception:
-        final_balance = "N/A"
-
-    result_text = (
-        "💎 *SHOPSY BLAST COMPLETED* 💎\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📱 Account: `{mobile_number}`\n"
-        f"🪙 Coins Claimed: `+{total_coins}`\n"
-        f"💰 Total Balance: `{final_balance}`\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "✅ All async threads executed successfully!"
-    )
-    await status_msg.edit_text(result_text, parse_mode="Markdown")
+    await status_msg.edit_text(f"💎 *BLAST COMPLETED*\n\n📱 Mobile: `{mobile_number}`\n🪙 Coins Claimed: `+{total_coins}`", parse_mode="Markdown")
 
 async def accounts_command(update: Update, context):
     sessions = load_sessions()
     if not sessions:
-        msg = "📂 *NO SAVED ACCOUNTS FOUND*\nUse `/login <mobile>` to add an account."
-        if update.callback_query:
-            await update.callback_query.edit_message_text(msg, parse_mode="Markdown")
-        else:
-            await update.message.reply_text(msg, parse_mode="Markdown")
-        return
+        msg = "📂 *NO SAVED ACCOUNTS FOUND*"
+    else:
+        accs = "\n".join([f"• `{m}`" for m in sessions.keys()])
+        msg = f"📑 *SAVED SESSIONS:*\n\n{accs}"
 
-    acc_list = []
-    for idx, mob in enumerate(sessions.keys(), 1):
-        acc_list.append(f"`{idx}.` 📱 `{mob}`")
-
-    accs = "\n".join(acc_list)
-    msg = (
-        "📑 *SAVED SHOPSY SESSIONS*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{accs}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👉 Run `/blast <mobile>` to claim coins."
-    )
     if update.callback_query:
-        keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu")]]
-        await update.callback_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.callback_query.edit_message_text(msg, parse_mode="Markdown")
     else:
         await update.message.reply_text(msg, parse_mode="Markdown")
 
-# Register Handlers
+# Register Bot Handlers
 telegram_app.add_handler(CommandHandler("start", start_command))
 telegram_app.add_handler(CommandHandler("login", login_command))
 telegram_app.add_handler(CommandHandler("otp", otp_command))
@@ -341,17 +294,21 @@ telegram_app.add_handler(CommandHandler("blast", blast_command))
 telegram_app.add_handler(CommandHandler("accounts", accounts_command))
 telegram_app.add_handler(CallbackQueryHandler(callback_handler))
 
-async def process_telegram_update(update_json):
-    async with telegram_app:
-        update = Update.de_json(update_json, telegram_app.bot)
-        await telegram_app.process_update(update)
+# Bot Initialization in Loop
+async def init_telegram():
+    await telegram_app.initialize()
+    await telegram_app.start()
 
+loop.run_until_complete(init_telegram())
+
+# --- FLASK SERVER & WEBHOOK ---
 @app.route("/webhook", methods=["POST"])
 def webhook():
     if request.method == "POST":
         try:
             update_json = request.get_json(force=True)
-            asyncio.run(process_telegram_update(update_json))
+            update = Update.de_json(update_json, telegram_app.bot)
+            loop.create_task(telegram_app.process_update(update))
             return jsonify({"status": "ok"}), 200
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)}), 500
@@ -359,8 +316,9 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "Shopsy Telegram Bot Server Running!", 200
+    return "Shopsy Telegram Bot Active!", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
