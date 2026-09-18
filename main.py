@@ -1,6 +1,7 @@
 import os
 import urllib.parse
 import base64
+import asyncio
 from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -8,9 +9,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # Flask app initialization
 app = Flask(__name__)
 
-# Configs - Direct Token Fallback added
+# Configs
 TOKEN = os.getenv("TELEGRAM_TOKEN", "8772577579:AAGwh5SabsaB26fgMGm9vO9FBnFtCwn37KQ")
-WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")  # Render automatically ye URL provide karta hai
+WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 # Telegram Application Setup
 tg_app = Application.builder().token(TOKEN).build()
@@ -46,30 +47,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 tg_app.add_handler(CommandHandler("start", start))
 tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# Flask Routes
+# Variable to track initialization state
+is_initialized = False
+
+async def main_init():
+    global is_initialized
+    if not is_initialized:
+        await tg_app.initialize()
+        if WEBHOOK_URL:
+            webhook_endpoint = f"{WEBHOOK_URL}/{TOKEN}"
+            await tg_app.bot.set_webhook(url=webhook_endpoint)
+            print(f"Webhook successfully set to: {webhook_endpoint}")
+        is_initialized = True
+
+# Flask Routes (Synchronous for Flask stability)
 @app.route("/")
 def home():
     return "Bot is running on Render with Flask!"
 
 @app.route(f"/{TOKEN}", methods=["POST"])
-async def webhook():
-    """Telegram se aane wale updates ko handle karne ke liye route"""
+def webhook():
+    """Telegram webhook handler without Flask-level async conflicts"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Initialize bot if not done yet
+    if not is_initialized:
+        loop.run_until_complete(main_init())
+        
     update = Update.de_json(request.get_json(force=True), tg_app.bot)
-    await tg_app.process_update(update)
+    loop.run_until_complete(tg_app.process_update(update))
+    loop.close()
+    
     return "ok", 200
 
 if __name__ == "__main__":
-    import asyncio
-    
     port = int(os.environ.get("PORT", 5000))
-    
-    # Webhook setup function
-    async def setup_webhook():
-        await tg_app.initialize()
-        if WEBHOOK_URL:
-            webhook_endpoint = f"{WEBHOOK_URL}/{TOKEN}"
-            await tg_app.bot.set_webhook(url=webhook_endpoint)
-            print(f"Webhook set to: {webhook_endpoint}")
-
-    asyncio.run(setup_webhook())
     app.run(host="0.0.0.0", port=port)
