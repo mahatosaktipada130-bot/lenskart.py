@@ -292,6 +292,10 @@ flask_thread.start()
 
 # --- TELEGRAM BOT (MAIN THREAD) ---
 if __name__ == "__main__":
+    # Event loop fix for Python 3.10+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start_command))
     bot_app.add_handler(CommandHandler("login", login_command))
