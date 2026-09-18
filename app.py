@@ -6,8 +6,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from google import genai
 
 # Load Environment Variables
-TELEGRAM_BOT_TOKEN = os.getenv("8376027265:AAFuOeCcDrQ7Ws4WGDkDy3vmpfgJa8iaGCE")
-GEMINI_API_KEY = os.getenv("AQ.Ab8RN6IU_a-8qJE50zw0XKTbZnim-0cKC7C2HHlLOXOzv7-6UQ")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Initialize Flask App & Gemini Client
 app = Flask(__name__)
@@ -38,13 +38,21 @@ async def handle_message(update: Update, context):
 telegram_app.add_handler(CommandHandler("start", start_command))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# Webhook Endpoint for Telegram Updates
+# Webhook Endpoint for Telegram Updates (Gunicorn Compatible)
 @app.route("/webhook", methods=["POST"])
 def webhook():
     if request.method == "POST":
-        asyncio.run(telegram_app.initialize())
         update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-        asyncio.run(telegram_app.process_update(update))
+        
+        # New event loop per request for Gunicorn WSGI workers
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(telegram_app.initialize())
+            loop.run_until_complete(telegram_app.process_update(update))
+        finally:
+            loop.close()
+            
         return jsonify({"status": "ok"}), 200
     return jsonify({"status": "method not allowed"}), 405
 
