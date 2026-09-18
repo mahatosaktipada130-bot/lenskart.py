@@ -277,11 +277,21 @@ async def accounts_command(update: Update, context):
     else:
         await update.message.reply_text(msg, parse_mode="Markdown")
 
-# --- BACKGROUND BOT RUNNER ---
-def run_telegram_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
+# --- FLASK SERVER FOR RENDER (BACKGROUND THREAD) ---
+@app.route("/")
+def home():
+    return "Shopsy Bot Service Active & Healthy!", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+# Flask ko background thread par start karein
+flask_thread = threading.Thread(target=run_flask, daemon=True)
+flask_thread.start()
+
+# --- TELEGRAM BOT (MAIN THREAD) ---
+if __name__ == "__main__":
     bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start_command))
     bot_app.add_handler(CommandHandler("login", login_command))
@@ -290,22 +300,11 @@ def run_telegram_bot():
     bot_app.add_handler(CommandHandler("accounts", accounts_command))
     bot_app.add_handler(CallbackQueryHandler(callback_handler))
 
-    # Old webhook remove kar rahe hain taaki polling bina issue chale
-    requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true")
-    
-    print("Starting Bot Polling thread...")
+    # Old Webhooks clear karein
+    try:
+        requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true")
+    except Exception:
+        pass
+
+    print("Bot Main Thread par Polling start kar raha hai...")
     bot_app.run_polling(drop_pending_updates=True)
-
-# Separate Thread me bot start karein
-bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
-bot_thread.start()
-
-# --- FLASK WEB SERVER FOR RENDER HEALTH CHECK ---
-@app.route("/")
-def home():
-    return "Shopsy Bot Service Active & Healthy!", 200
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-
