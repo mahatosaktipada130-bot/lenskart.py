@@ -5,28 +5,22 @@ import uuid
 import random
 import asyncio
 import sqlite3
+import threading
 import aiohttp
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
-# Hardcoded Bot Token & Config
+# Config
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8772577579:AAGP6OKPBcY6OIwb48OS4nAWM00LVIM9imE")
 DB_FILE = "shopsy_sessions.db"
 GAMES_LIST = ["ludo", "match-3", "city-builder", "goods-triple", "runner-3d", "nazaria"]
 
+USER_STATES = {}
 app = Flask(__name__)
 
-# Single Global Event Loop & Bot Instance
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-# Temporary memory for OTP flow
-USER_STATES = {}
-
-# --- DATABASE HELPERS ---
+# --- DATABASE SETUP ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -48,7 +42,6 @@ def load_sessions():
     cursor.execute("SELECT mobile, account_id, tokens FROM sessions")
     rows = cursor.fetchall()
     conn.close()
-    
     sessions = {}
     for row in rows:
         sessions[row[0]] = {"account_id": row[1], "tokens": json.loads(row[2])}
@@ -64,7 +57,7 @@ def save_session(mobile, account_id, tokens):
     conn.commit()
     conn.close()
 
-# --- SHOPSY ASYNC LOGIC ---
+# --- ASYNC SHOPSY BLAST ENGINE ---
 async def prepare_and_wait(session, games_url, game_id, account_id, headers, fire_trigger):
     start_payload = {"requestMethod": "POST", "routeUri": "game/game-started", "payload": {"userId": account_id, "gameId": game_id}}
     try:
@@ -102,7 +95,7 @@ async def execute_async_blast(games_url, account_id, headers, queued_tasks, max_
         results = await asyncio.gather(*tasks)
         return sum(filter(None, results))
 
-# --- HANDLERS ---
+# --- TELEGRAM COMMAND HANDLERS ---
 async def start_command(update: Update, context):
     keyboard = [
         [InlineKeyboardButton("📱 Saved Accounts", callback_data="view_accounts"),
@@ -114,13 +107,11 @@ async def start_command(update: Update, context):
         "✨ *WELCOME TO SHOPSY ULTRA BLASTER* ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔥 *High-Speed Automated Claim Engine*\n\n"
-        "📌 *Quick Command Syntax:*\n"
-        "├ 🔐 `/login <mobile>` — Request Login OTP\n"
-        "├ 🔑 `/otp <code>` — Verify & Save Account\n"
-        "├ 💥 `/blast <mobile>` — Trigger High-Speed Claim\n"
-        "└ 📑 `/accounts` — View Saved Sessions\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👇 *Select an action below to get started:*"
+        "📌 *Quick Commands:*\n"
+        "├ 🔐 `/login <mobile>` — Request OTP\n"
+        "├ 🔑 `/otp <code>` — Save Account\n"
+        "├ 💥 `/blast <mobile>` — Claim Coins\n"
+        "└ 📑 `/accounts` — View Saved Accounts"
     )
     if update.message:
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
@@ -133,7 +124,7 @@ async def callback_handler(update: Update, context):
     if query.data == "view_accounts":
         await accounts_command(update, context)
     elif query.data == "quick_blast":
-        await query.message.reply_text("⚡ Format: `/blast <mobile_number>`", parse_mode="Markdown")
+        await query.message.reply_text("⚡ Command Format: `/blast <mobile_number>`", parse_mode="Markdown")
     elif query.data == "view_help":
         keyboard = [[InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]]
         help_msg = "🛠 *COMMANDS*\n`/login <mobile>`\n`/otp <code>`\n`/blast <mobile>`\n`/accounts`"
@@ -144,7 +135,7 @@ async def callback_handler(update: Update, context):
 async def login_command(update: Update, context):
     user_id = update.effective_user.id
     if not context.args:
-        await update.message.reply_text("⚠️ Format: `/login 9876543210`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Usage: `/login 9876543210`", parse_mode="Markdown")
         return
 
     mobile_number = context.args[0].strip()
@@ -183,7 +174,7 @@ async def login_command(update: Update, context):
     action_context = res_data_1.get('RESPONSE', {}).get('actionResponseContext', {})
 
     if action_context.get('remainingAttempts') == 0:
-        await update.message.reply_text("⛔ *Rate Limit Exceeded!* Please try again later.", parse_mode="Markdown")
+        await update.message.reply_text("⛔ *Rate Limit Exceeded!*", parse_mode="Markdown")
         return
 
     req_id = action_context.get('requestId')
@@ -195,7 +186,7 @@ async def login_command(update: Update, context):
         "mobile": mobile_number, "req_id": req_id,
         "headers": dict(session.headers), "device_id": device_id
     }
-    await update.message.reply_text(f"📲 *OTP Sent to `{mobile_number}`*\nSubmit: `/otp <your_code>`", parse_mode="Markdown")
+    await update.message.reply_text(f"📲 *OTP Sent to `{mobile_number}`*\nSubmit code: `/otp <code_here>`", parse_mode="Markdown")
 
 async def otp_command(update: Update, context):
     user_id = update.effective_user.id
@@ -235,7 +226,7 @@ async def otp_command(update: Update, context):
         }
         save_session(state["mobile"], account_id, auth_tokens)
         del USER_STATES[user_id]
-        await update.message.reply_text(f"🎉 *Login Success!* Account `{state['mobile']}` saved.", parse_mode="Markdown")
+        await update.message.reply_text(f"🎉 *Login Successful!* Saved `{state['mobile']}`.", parse_mode="Markdown")
     else:
         await update.message.reply_text("❌ *Login Failed!* Invalid OTP.", parse_mode="Markdown")
 
@@ -251,7 +242,7 @@ async def blast_command(update: Update, context):
         await update.message.reply_text("❌ *Account not found!* Use `/login` first.", parse_mode="Markdown")
         return
 
-    status_msg = await update.message.reply_text("🚀 *Executing High-Speed Blast...*", parse_mode="Markdown")
+    status_msg = await update.message.reply_text("🚀 *Executing High-Speed Claim Engine...*", parse_mode="Markdown")
 
     data = sessions[mobile_number]
     account_id = data["account_id"]
@@ -286,37 +277,33 @@ async def accounts_command(update: Update, context):
     else:
         await update.message.reply_text(msg, parse_mode="Markdown")
 
-# Register Bot Handlers
-telegram_app.add_handler(CommandHandler("start", start_command))
-telegram_app.add_handler(CommandHandler("login", login_command))
-telegram_app.add_handler(CommandHandler("otp", otp_command))
-telegram_app.add_handler(CommandHandler("blast", blast_command))
-telegram_app.add_handler(CommandHandler("accounts", accounts_command))
-telegram_app.add_handler(CallbackQueryHandler(callback_handler))
+# --- BACKGROUND BOT RUNNER ---
+def run_telegram_bot():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    bot_app.add_handler(CommandHandler("start", start_command))
+    bot_app.add_handler(CommandHandler("login", login_command))
+    bot_app.add_handler(CommandHandler("otp", otp_command))
+    bot_app.add_handler(CommandHandler("blast", blast_command))
+    bot_app.add_handler(CommandHandler("accounts", accounts_command))
+    bot_app.add_handler(CallbackQueryHandler(callback_handler))
 
-# Bot Initialization in Loop
-async def init_telegram():
-    await telegram_app.initialize()
-    await telegram_app.start()
+    # Old webhook remove kar rahe hain taaki polling bina issue chale
+    requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true")
+    
+    print("Starting Bot Polling thread...")
+    bot_app.run_polling(drop_pending_updates=True)
 
-loop.run_until_complete(init_telegram())
+# Separate Thread me bot start karein
+bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
+bot_thread.start()
 
-# --- FLASK SERVER & WEBHOOK ---
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    if request.method == "POST":
-        try:
-            update_json = request.get_json(force=True)
-            update = Update.de_json(update_json, telegram_app.bot)
-            loop.create_task(telegram_app.process_update(update))
-            return jsonify({"status": "ok"}), 200
-        except Exception as e:
-            return jsonify({"status": "error", "message": str(e)}), 500
-    return jsonify({"status": "method not allowed"}), 405
-
+# --- FLASK WEB SERVER FOR RENDER HEALTH CHECK ---
 @app.route("/")
 def home():
-    return "Shopsy Telegram Bot Active!", 200
+    return "Shopsy Bot Service Active & Healthy!", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
